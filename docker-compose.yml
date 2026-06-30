@@ -1,0 +1,63 @@
+# Single-droplet deployment: Arq worker + Redis. Postgres is expected to be a
+# managed service (Supabase / DO Managed PG) via DATABASE_URL; an optional local
+# postgres service is provided behind the `dev` profile for local end-to-end runs.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    # Secrets arrive from a root-owned env file, never baked into the image.
+    # Local dev: `.env`.  Droplet: /etc/buyingsignal/secrets.env (chmod 600).
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Single-purpose service; no inbound ports published.
+    command: ["arq", "buyingsignal.worker.WorkerSettings"]
+
+  # One-off migration runner: `docker compose run --rm migrate`.
+  migrate:
+    build: .
+    profiles: ["tools"]
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence so queued jobs survive restarts.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Local-only Postgres for development; enable with `--profile dev`.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["dev"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: buyingsignal
+      POSTGRES_PASSWORD: buyingsignal
+      POSTGRES_DB: buyingsignal
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buyingsignal"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  pg-data:
